@@ -35,7 +35,7 @@ check_run() {
         echo "SUCCESS (edge of domain)" | tee -a "$LOG"
     else
         # a real error -- keep the err file for inspection
-        echo "FAILED" | tee -a "$LOG"
+        echo "ERROR" | tee -a "$LOG"
     fi
 }
 
@@ -43,9 +43,9 @@ check_run() {
 MED_DIR="$OUTDIR/run_median"
 mkdir -p "$MED_DIR"
 
-printf "Initiating Run with median rates ... " | tee -a "$LOG"
-MED_LOG="${OUTDIR}/det_med_log.txt"
-MED_ERR="${OUTDIR}/det_med_err.txt"
+printf "Median Run, STATUS: " | tee -a "$LOG"
+MED_LOG="${OUTDIR}/det_log_med.txt"
+MED_ERR="${OUTDIR}/det_err_med.txt"
 eval "$EXEC $INPUTS network.starlib_seed=-1" > "${MED_LOG}" 2> "${MED_ERR}"
 check_run "$MED_ERR"
 
@@ -68,9 +68,9 @@ for (( i=1; i<=NRUNS; i++)); do
         fi
     done
 
-    printf "Initiating Run %d with seed %s ... " "$i" "$SEED" | tee -a "$LOG"
-    RUN_LOG="${OUTDIR}/det_${i}_log.txt"
-    RUN_ERR="${OUTDIR}/det_${i}_err.txt"
+    printf "Run %d: %s, STATUS:" "$i" "$SEED" | tee -a "$LOG"
+    RUN_LOG="${OUTDIR}/det_log_${i}.txt"
+    RUN_ERR="${OUTDIR}/det_err_${i}.txt"
     eval "$EXEC $INPUTS network.starlib_seed=${SEED}" > "${RUN_LOG}" 2> "${RUN_ERR}"
     check_run "$RUN_ERR"
 

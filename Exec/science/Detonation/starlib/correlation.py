@@ -126,7 +126,7 @@ def normalize_speeds(runs, output=True):
         print(slimline)
         print()
 
-    return norm_shock_speeds
+    return norm_shock_speeds, median_speed, std
 
 def read_deviates(plotfile):
     job_info_path = os.path.join(plotfile, "job_info")
@@ -182,7 +182,7 @@ def collect_deviates(runs):
     return rate_deviates
 
 def analysis(runs):
-    norm_speeds = normalize_speeds(runs)
+    norm_speeds, _, _ = normalize_speeds(runs)
     deviates = collect_deviates(runs)
 
     # We use dictionaries, as some indices might be skipped over due 
