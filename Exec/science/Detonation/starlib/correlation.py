@@ -182,7 +182,7 @@ def collect_deviates(runs):
     return rate_deviates
 
 def analysis(runs):
-    norm_speeds, _, _ = normalize_speeds(runs)
+    norm_speeds, median, stdev = normalize_speeds(runs)
     deviates = collect_deviates(runs)
 
     # We use dictionaries, as some indices might be skipped over due 
@@ -212,9 +212,9 @@ def analysis(runs):
 
     print(slimline)
 
-    return norm_speeds, deviates, p_corrs, s_corrs
+    return norm_speeds, deviates, p_corrs, s_corrs, median, stdev
 
-def plot(n_rates, do_fit, speeds, deviates, corrs):
+def plot(n_rates, do_fit, speeds, deviates, corrs, median, stdev):
 
     ranked = sorted(corrs.items(), key=lambda kv: abs(kv[1][0]), reverse=True)
 
@@ -225,7 +225,7 @@ def plot(n_rates, do_fit, speeds, deviates, corrs):
 
     for rate, (corr, p_val) in ranked[:n_rates]:
         x = np.array([deviates[rate][n] for n in nums])
-        ax.scatter(x, y, label=f"{rate} (r={corr:.3f}, p={p_val:.3f})",
+        ax.scatter(x, y, label=f"{rate} (ρ={corr:.3f}, p={p_val:.3f})",
                    alpha=0.7)
 
     if do_fit:
@@ -237,26 +237,131 @@ def plot(n_rates, do_fit, speeds, deviates, corrs):
         ax.plot(x_lin, m*x_lin + b, label=f"Linear fit for {rate}")
 
     ax.set_xlabel("deviate")
-    ax.set_ylabel("normalized shock speed")
+    ax.set_ylabel("normalized shock speed (z)")
     ax.set_title(f"Top {n_rates} correlated rates")
 
-    ax.legend(
+    legend = ax.legend(
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.15),
+        bbox_to_anchor=(0.5, -0.20),
         ncol=2,
         fontsize="small",
         frameon=True,
     )
 
-    fig.savefig("top_rates.png", bbox_inches="tight")
+    fig.text(0.5, 0.0, f"Shock speed (cm/s): {median:.3e} + z * {stdev:.3e}",
+             ha="center", va="top", fontsize=9)
+
+    fig.savefig("top_rates.png", bbox_inches="tight",
+                bbox_extra_artists=(legend,))
     plt.close(fig)
+
+def parse_info_txt(info_txt_path):
+    "Parses an info.txt file in to a dict which maps the run's local index to (seed, status)"
+    info = {}
+    with open(info_txt_path) as f:
+        for line in f:
+            line = line.strip()
+
+            #skip over any empty lines
+            if not line:
+                continue
+
+            if line.startswith("Median Run"):
+                status = line.split("STATUS:")[1].strip().split()[0]
+                info["median"] = (-1, status)
+
+            elif line.startswith("Run"):
+                header, status = line.split(",")
+
+                #read header
+                run_num = header.split(":")[0].split()[1]
+                seed = int(header.split(":")[1].strip())
+                #read status
+                status = status.split(":")[1].strip().split()
+
+                # if status is empty then there this run is still running,
+                if not status:
+                    status =  "PENDING"
+                else:
+                    status = status[0]
+
+                info[run_num] = (seed, status)
+
+    return info
+
+def read_directories(directories):
+    runs = {}
+    idx = 1
+    median_seen = False
+    seen_seeds = set()
+
+    #list directories provided
+    print(f"Total directories provided: {len(directories)}")
+    print(slimline)
+    print(f"Extracting runs and plotfiles ...")
+
+    for dir_path in directories:
+
+        dir_path = Path(dir_path)
+        if not dir_path.is_dir():
+            raise ValueError(f"{dir_path} is not a directory")
+
+        #find this dir's info file
+        info_path = dir_path / "summary.txt"
+        if not info_path.is_file():
+            raise ValueError(f"{info_path} not found")
+        info = parse_info_txt(info_path)
+
+        for run_dir in sorted(dir_path.glob("run_*")):
+            #Ensure that none of the log files enter the dict for runs
+            if not run_dir.is_dir():
+                continue
+
+            orig_prefix = run_dir.name.split("_")[1]
+
+            #We should be able to find this orig_prefix in info as well
+            if orig_prefix not in info:
+                print(f"Warning: {run_dir} has no entry in {info_path}, skipping")
+                continue
+            seed, status = info[orig_prefix]
+
+            #skip over failed runs
+            if status != "SUCCESS":
+                print(f"Skipping {run_dir} (status: {status})")
+                continue
+
+            #Avoid having several median cases
+            if orig_prefix == "median":
+                if median_seen:
+                    continue
+                median_seen = True
+                new_prefix = "median"
+            else:
+                if seed in seen_seeds:
+                    print(f"Skipping {run_dir}, duplicate seed: {seed}")
+                    continue
+                seen_seeds.add(seed)
+                new_prefix = str(idx)
+                idx += 1
+
+            plotfiles = sorted(run_dir.glob("det_x_plt*"))
+            runs[new_prefix] = plotfiles
+
+    print(f"Total of {len(runs) - 1} + 1 runs established")
+    print(slimline)
+
+    return runs
 
 if __name__ == "__main__":
 
+    print(boldline)
+    print("CORRELATION ANALYSIS for starlib deviates and shock speeds")
+    print(boldline)
+
     p = argparse.ArgumentParser()
 
-    p.add_argument("directory", type=str,
-                   help="directories holding runs")
+    p.add_argument("directories", type=str, nargs="+",
+                    help="directories holding runs")
     p.add_argument("--do_plot", type=int, default=0,
                    help="Plot and fit n-most correlated rates")
     p.add_argument("--do_fit", action="store_true",
@@ -264,30 +369,8 @@ if __name__ == "__main__":
 
     args = p.parse_args()
 
-    dir_path = Path(args.directory)
-    if not dir_path.is_dir():
-        raise ValueError(f"{dir_path} is not a directory")
-
-    runs = {}
-
-    for run_dir in dir_path.glob("run_*"):
-        #Ensure that none of the log files enter the dict
-        if not run_dir.is_dir():
-            continue
-
-        prefix = run_dir.name.split("_")[1]
-        plotfiles = sorted(run_dir.glob("det_x_plt*"))
-
-        runs[prefix] = plotfiles
-
-    print(boldline)
-    print("CORRELATION ANALYSIS for starlib deviates and shock speeds")
-    print(boldline)
-    print(f"Total of {len(runs) - 1} + 1 runs found")
-    print(slimline)
-    print()
-
-    norm_speeds, deviates, p_corrs, s_corrs = analysis(runs)
+    runs = read_directories(args.directories)
+    norm_speeds, deviates, p_corrs, s_corrs, median, stdev= analysis(runs)
 
     if args.do_plot > 0:
-        plot(args.do_plot, args.do_fit, norm_speeds, deviates, p_corrs)
+        plot(args.do_plot, args.do_fit, norm_speeds, deviates, s_corrs, median, stdev)

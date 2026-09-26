@@ -9,7 +9,8 @@ import yt
 from yt.frontends.boxlib.api import CastroDataset
 from scipy.stats import pearsonr, spearmanr
 
-from correlation import collect_deviates, normalize_speeds, get_T_profile, find_x_for_T
+from correlation import (collect_deviates, normalize_speeds, parse_info_txt,
+                         get_T_profile, find_x_for_T, read_directories)
 
 yt.set_log_level(40)
 
@@ -103,7 +104,7 @@ def integrate(ds, v_mean, x_final, t_final, t_frac=None, t_const=None):
     return M_Ni56, M_Ni58, M_Fe56, M_Ni56 / M_Ni58, M_Ni56 / M_Fe56
 
 
-def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear):
+def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear, write_rates):
     Ni_corrs, Fe_corrs = {}, {}
 
     #define a dict to store mass ratios
@@ -144,7 +145,7 @@ def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear):
     if frac:
         print(f"Mass ratios are calculated over final {frac*100:.2f}% of the time domain")
     if const:
-        print(f"Mass rations are calculater over final {const:.2f}s of the time domain")
+        print(f"Mass ratios are calculated over final {const:.2f}s of the time domain")
 
     print(slimline)
     if do_linear:
@@ -174,6 +175,23 @@ def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear):
     if do_plot:
         plot_mass_v_deviates(do_plot, (Ni_mass_ratios, Fe_mass_ratios), deviates, Ni_corrs, Fe_corrs)
         print("Created mass_ratios.png")
+        print(slimline)
+
+    #write out top most correlated rates in a .txt file 
+    if write_rates:
+        Ni_ranked = sorted(Ni_corrs.items(), key=lambda kv: abs(kv[1][0]), reverse=True)
+        Fe_ranked = sorted(Fe_corrs.items(), key=lambda kv: abs(kv[1][0]), reverse=True)
+
+        with open("rates.txt", "w", encoding="utf-8") as file:
+            file.write(f"Top {write_rates} most correlated rates for M(Ni56)/M(Ni58)\n")
+            for rate, (_, _) in Ni_ranked[:write_rates]:
+                file.write(f"{rate}\n")
+
+            file.write("\n")
+            file.write(f"Top {write_rates} most correlated rates for M(Ni56)/M(Fe56)\n")
+            for rate, (_, _) in Fe_ranked[:write_rates]:
+                file.write(f"{rate}\n")
+        print("Created rates.txt")
         print(slimline)
 
     print()
@@ -212,13 +230,19 @@ def correlation_w_speed(runs, mass_ratios, do_plot):
     print()
 
     if do_plot:
-        fig, ax = plt.subplots()
-        ax.scatter(x, y_Ni, alpha=0.7, label="M(Ni56)/M(Ni58)")
-        ax.scatter(x, y_Fe, alpha=0.7, label="M(Ni56)/M(Fe56)")
-        ax.set_xlabel("Normalized shock speed (z)")
-        ax.set_ylabel("Mass ratios")
-        ax.set_title(f"Mass ratios vs Shock speed")
-        fig.text(0.5, -0.03, f"Shock speed (cm/s): {median:.3e} + z * {stdev:.3e}")
+        fig, (ax_Ni, ax_Fe) = plt.subplots(1, 2, figsize=(12, 5))
+        ax_Ni.scatter(x, y_Ni, alpha=0.7, color="b")
+        ax_Fe.scatter(x, y_Fe, alpha=0.7, color="r")
+
+        ax_Ni.set_xlabel("Normalized shock speed (z)")
+        ax_Fe.set_xlabel("Normalized shock speed (z)")
+
+        ax_Ni.set_ylabel("M(Ni56)/M(Ni58)")
+        ax_Fe.set_ylabel("M(Ni56)/M(Fe56)")
+
+        fig.suptitle(f"Mass ratios vs Shock speed")
+        fig.text(0.5, -0.03, f"Shock speed (cm/s): {median:.3e} + z * {stdev:.3e}", 
+                 ha="center", va="bottom", fontsize=9)
         fig.savefig("mass_v_speed.png", bbox_inches="tight")
         plt.close()
 
@@ -227,7 +251,6 @@ def correlation_w_speed(runs, mass_ratios, do_plot):
 
 def mass_ratios_over_time(read_runs):
     print("Varying integration bounds to determine Ni mass ratios...")
-    print()
 
     fig, ((ax1_ratio, ax1_mass), (ax2_ratio, ax2_mass)) = plt.subplots(2, 2, figsize=(12, 12))
 
@@ -258,22 +281,22 @@ def mass_ratios_over_time(read_runs):
             x_final = values["x_final"]
             t_final = values["t_final"]
 
-            (M_Ni56c[i], M_Ni58c[i], M_Fe56c[i], 
-            Ni_ratiosc[i], Ni_ratiosf) = integrate(ds, v_mean, x_final, t_final, t_const=const)
+            (M_Ni56c[i], M_Ni58c[i], M_Fe56c[i],
+            Ni_ratiosc[i], Fe_ratiosc[i]) = integrate(ds, v_mean, x_final, t_final, t_const=const)
 
 
         if prefix == "median":
-            ax1_ratio.plot(t_fracs, Ni_ratiosf, label="median", color='darkblue', zorder=1)
-            ax1_ratio.plot(t_fracs, Fe_ratiosf, label="median", color='darkred', zorder=1)
+            ax1_ratio.plot(t_fracs, Ni_ratiosf, label="M(Ni56)/M(Ni58)", color='darkblue', zorder=1)
+            ax1_ratio.plot(t_fracs, Fe_ratiosf, label="M(Ni56)/MFe56)", color='darkred', zorder=1)
             ax1_mass.plot(t_fracs, M_Ni56f, label="M_Ni56", color='darkblue', zorder=1)
             ax1_mass.plot(t_fracs, M_Ni58f, label="M_Ni58", color='darkred', zorder=1)
             ax1_mass.plot(t_fracs, M_Fe56f, label="M_Fe58", color='darkgreen', zorder=1)
 
-            ax2_ratio.plot(t_consts, Ni_ratiosc, label="median", color='darkblue', zorder=1)
-            ax2_ratio.plot(t_consts, Fe_ratiosc, label="median", color='darkred', zorder=1)
+            ax2_ratio.plot(t_consts, Ni_ratiosc, label="M(Ni56)/M(Ni58)", color='darkblue', zorder=1)
+            ax2_ratio.plot(t_consts, Fe_ratiosc, label="M(Ni56)/M(Fe56)", color='darkred', zorder=1)
             ax2_mass.plot(t_consts, M_Ni56c, label="M_Ni56", color='darkblue', zorder=1)
             ax2_mass.plot(t_consts, M_Ni58c, label="M_Ni58", color='darkred', zorder=1)
-            ax2_mass.plot(t_consts, M_Fe56c, label="M_Fe58", color='darkgreen', zorder=1)
+            ax2_mass.plot(t_consts, M_Fe56c, label="M_Fe56", color='darkgreen', zorder=1)
 
         else:
             ax1_ratio.plot(t_fracs, Ni_ratiosf, color='b', alpha=0.5, zorder=0)
@@ -291,26 +314,29 @@ def mass_ratios_over_time(read_runs):
 
     ax1_ratio.set_xlabel("Fraction of final time domain")
     ax1_ratio.set_ylabel("Mass ratios")
+    ax1_ratio.set_yscale("log")
     ax1_ratio.legend()
 
     ax1_mass.set_xlabel("Fraction of final time domain")
     ax1_mass.set_ylabel("Mass")
+    ax1_mass.set_yscale("log")
     ax1_mass.legend()
 
     ax2_ratio.set_xlabel("Const final time domain")
     ax2_ratio.set_ylabel("Mass ratios")
+    ax2_ratio.set_yscale("log")
     ax2_ratio.legend()
 
     ax2_mass.set_xlabel("Const final time domain")
     ax2_mass.set_ylabel("Mass")
+    ax2_mass.set_yscale("log")
     ax2_mass.legend()
 
-    fig.set_title(f"Mass ratios vs Integration bounds")
+    fig.suptitle(f"Mass ratios vs Integration bounds")
     fig.savefig("mass_v_integration.png", bbox_inches="tight")
     plt.close()
 
     print("Created mass_v_integration.png")
-    print(slimline)
 
 def plot_mass_v_deviates(n_rates, mass_ratios, deviates, Ni_corrs, Fe_corrs):
 
@@ -327,12 +353,12 @@ def plot_mass_v_deviates(n_rates, mass_ratios, deviates, Ni_corrs, Fe_corrs):
 
     for rate, (corr, p_val) in Ni_ranked[:n_rates]:
         x = np.array([deviates[rate][n] for n in nums])
-        ax_Ni.scatter(x, y_Ni, label=f"{rate} (r={corr:.3f}, p={p_val:.3f})",
+        ax_Ni.scatter(x, y_Ni, label=f"{rate} (ρ={corr:.3f}, p={p_val:.3f})",
                       alpha=0.7)
 
     for rate, (corr, p_val) in Fe_ranked[:n_rates]:
         x = np.array([deviates[rate][n] for n in nums])
-        ax_Fe.scatter(x, y_Fe, label=f"{rate} (r={corr:.3f}, p={p_val:.3f})",
+        ax_Fe.scatter(x, y_Fe, label=f"{rate} (ρ={corr:.3f}, p={p_val:.3f})",
                       alpha=0.7)
 
     ax_Ni.set_xlabel("deviate")
@@ -340,7 +366,7 @@ def plot_mass_v_deviates(n_rates, mass_ratios, deviates, Ni_corrs, Fe_corrs):
     ax_Ni.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.15),
-        ncol=2,
+        ncol=1,
         fontsize="small",
         frameon=True,
     )
@@ -350,48 +376,20 @@ def plot_mass_v_deviates(n_rates, mass_ratios, deviates, Ni_corrs, Fe_corrs):
     ax_Fe.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, -0.15),
-        ncol=2,
+        ncol=1,
         fontsize="small",
         frameon=True,
     )
 
-    fig.set_title(f"Mass ratios vs deviates for top {n_rates} correlated rates")
+    fig.suptitle(f"Mass ratios vs deviates for top {n_rates} correlated rates")
     fig.savefig("mass_ratios.png", bbox_inches="tight")
     plt.close(fig)
-
-def parse_info_txt(info_txt_path):
-    "Parses an info.txt file in to a dict which maps the run's local index to (seed, status)"
-    info = {}
-    with open(info_txt_path) as f:
-        for line in f:
-            line = line.strip()
-
-            #skip over any empty lines
-            if not line:
-                continue
-
-            if line.startswith("Median Run"):
-                status = line.split("STATUS:")[1].strip().split()[0]
-                info["median"] = (-1, status)
-
-            elif line.startswith("Run"):
-                header, status = line.split(",")
-
-                #read header
-                run_num = header.split(":")[0].split()[1]
-                seed = int(header.split(":")[1].strip())
-                #read status
-                status = status.split(":")[1].strip().split()[0]
-
-                info[run_num] = (seed, status)
-
-    return info
 
 
 if __name__ == "__main__":
 
     print(boldline)
-    print("CORRELATION ANALYSIS of starlib deviates with mass ratios of Ni isotopes")
+    print("CORRELATION ANALYSIS of starlib deviates and iron group nuclei")
     print(boldline)
 
     p = argparse.ArgumentParser()
@@ -400,6 +398,8 @@ if __name__ == "__main__":
                    help="directories holding runs")
     p.add_argument("--do_plot", type=int, default=0,
                    help="Plot and fit n-most correlated rates")
+    p.add_argument("--write_rates", type=int, default=5,
+                   help="writes a .txt file holding n most correlated rate, default n=5")
     p.add_argument("--do_linear_correlation", action="store_true",
                    help="Does a linear correlation if true, otherwise Spearman Correlation is used")
 
@@ -420,74 +420,30 @@ if __name__ == "__main__":
             raise ValueError("The constant time to be integrated over must be " \
                              "a floating point number between 0.01 and 2.0")
 
-    runs = {}
-    idx = 1
-    median_seen = False
-    seen_seeds = set()
-
-    #list directories provided
-    print(f"Total directories provided: {len(args.directories)}")
-    print(slimline)
-    print(f"Extracting runs and plotfiles ...")
-
-    for dir_path in args.directories:
-
-        dir_path = Path(dir_path)
-        if not dir_path.is_dir():
-            raise ValueError(f"{dir_path} is not a directory")
-
-        #find this dir's info file
-        info_path = dir_path / "summary.txt"
-        if not info_path.is_file():
-            raise ValueError(f"{info_path} not found")
-        info = parse_info_txt(info_path)
-
-        for run_dir in sorted(dir_path.glob("run_*")):
-            #Ensure that none of the log files enter the dict for runs
-            if not run_dir.is_dir():
-                continue
-
-            orig_prefix = run_dir.name.split("_")[1]
-
-            #We should be able to find this orig_prefix in info as well
-            if orig_prefix not in info:
-                print(f"Warning: {run_dir} has no entry in {info_path}, skipping")
-                continue
-            seed, status = info[orig_prefix]
-
-            #skip over failed runs
-            if status != "SUCCESS":
-                print(f"Skipping {run_dir} (status: {status})")
-                continue
-
-            #Avoid having several median cases
-            if orig_prefix == "median":
-                if median_seen:
-                    continue
-                median_seen = True
-                new_prefix = "median"
-            else:
-                if seed in seen_seeds:
-                    print(f"Skipping {run_dir}, duplicate seed: {seed}")
-                    continue
-                seen_seeds.add(seed)
-                new_prefix = str(idx)
-                idx += 1
-
-            plotfiles = sorted(run_dir.glob("det_x_plt*"))
-            runs[new_prefix] = plotfiles
+    runs = read_directories(args.directories)
 
     read_runs = {}
     for prefix, plotfiles in runs.items():
         read_runs[prefix] = read_plotfiles(plotfiles)
 
+    t_final = np.array([v["t_final"] for v in read_runs.values()])
+    x_final = np.array([v["x_final"] for v in read_runs.values()])
 
-    print(f"Total of {len(runs) - 1} + 1 runs established")
-    print(slimline)
+    #Print out some details about the runs before doing correlation work
+    mean_t, std_t = t_final.mean(), t_final.std()
+    max_t, min_t = t_final.max(), t_final.min()
+
+    mean_x, std_x = x_final.mean(), x_final.std(),
+    max_x, min_x = x_final.max(), x_final.min()
+
+    print("Across runs:")
+    print(f"x_final: mean = {mean_x:.3e}, stddev = {std_x:.3e}, min = {min_x:.3e}, max = {max_x:.3e}")
+    print(f"t_final: mean = {mean_t:.3f}, stddev = {std_t:.3f}, min = {min_t:.3f}, max = {max_t:.3f}")
+    print(boldline)
     print()
 
     mass_ratios = correlation_w_deviates(runs, read_runs, args.time_frac, args.time_const,
-                                         args.do_plot, args.do_linear_correlation)
+                                         args.do_plot, args.do_linear_correlation, args.write_rates)
     correlation_w_speed(runs, mass_ratios, args.do_plot)
     mass_ratios_over_time(read_runs)
 
