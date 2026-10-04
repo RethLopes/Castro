@@ -2,6 +2,7 @@
 
 import argparse
 from pathlib import Path
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,63 +10,33 @@ import yt
 from yt.frontends.boxlib.api import CastroDataset
 from scipy.stats import pearsonr, spearmanr
 
-from correlation import (collect_deviates, normalize_speeds, parse_info_txt,
-                         get_T_profile, find_x_for_T, read_directories)
+from shock_speed import read_directories, shock_speed
+from correlation import (collect_deviates, normalize_speeds,
+                         get_T_profile, find_x_for_T)
 
 yt.set_log_level(40)
 
 slimline = "-----------------------------------------------------------------------------"
 boldline = "============================================================================="
 
-def mean_speed(plotfiles):
-    """ Calculates the mean shock speed given plotfiles"""
-
-    # use only the last quarter of plotfiles as this ensures
-    # a stable burning for
-    quarter = len(plotfiles) // 4
-    plotfiles = plotfiles[-quarter:]
-
-    v, dt, = [], []
-
-    for n, p in enumerate(plotfiles):
-        time, x, T = get_T_profile(p)
-        xpos = find_x_for_T(x, T)
-
-        if n == 0:
-            xpos_old = xpos
-            time_old = time
-        else:
-            # difference with the previous file to find the det speed
-            # note: the corresponding time is centered in the interval
-            v.append((xpos - xpos_old)/(time - time_old))
-            dt.append(time - time_old)
-
-            xpos_old = xpos
-            time_old = time
-
-    v = np.array(v)
-    dt = np.array(dt)
-
-    mean = np.average(v, weights=dt)
-
-    # return mean speed, final x position, final time
-    return mean, xpos, time
-
 def read_plotfiles(plotfiles):
     """ This function breaks off the expensive part of
         integrating mass fractions, i.e., reading plotfiles,
         so that files are not read at every integration call
     """
-    v_mean, x_final, t_final = mean_speed(plotfiles)
+    t, x, v = shock_speed(plotfiles)
     ds = CastroDataset(plotfiles[-1])
 
-    return {"v_mean": v_mean,
+    t_final = t[-1]
+    x_final = x[-1]
+
+    return {"v": v[0],
             "x_final": x_final,
             "t_final": t_final,
             "ds": ds}
 
 
-def integrate(ds, v_mean, x_final, t_final, t_frac=None, t_const=None):
+def integrate(ds, v, x_final, t_final, t_frac=None, t_const=None):
     """ Integrate the masses of Ni56 and Ni58 over the final
         `t_frac` of the time domain of a run.
     """
@@ -73,10 +44,13 @@ def integrate(ds, v_mean, x_final, t_final, t_frac=None, t_const=None):
     x_hi = x_final
     x_lo = x_final
     if t_frac:
-        x_lo -= v_mean * t_final * t_frac
+        x_lo -= v * t_final * t_frac
     if t_const:
-        assert t_final > t_const, "Integration bounds are larger than total time."
-        x_lo -= v_mean * t_const
+        if t_final < t_const:
+            t_const = 0.99 * t_final
+            warnings.warn("Integration upper bound is larger than t_final. Truncating.",
+                          UserWarning)
+        x_lo -= v * t_const
     if t_frac and t_const:
         raise ValueError("both fractional and absolute time domain provided," \
                          "only one is necessary.")
@@ -101,7 +75,7 @@ def integrate(ds, v_mean, x_final, t_final, t_frac=None, t_const=None):
     M_Ni58 = np.sum(rho_Ni58 * cell_volume)
     M_Fe56 = np.sum(rho_Fe56 * cell_volume)
 
-    return M_Ni56, M_Ni58, M_Fe56, M_Ni56 / M_Ni58, M_Ni56 / M_Fe56
+    return (M_Ni56, M_Ni58, M_Fe56), (M_Ni56 / M_Ni58, M_Ni56 / M_Fe56)
 
 
 def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear, write_rates):
@@ -114,16 +88,16 @@ def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear, wri
     for prefix, values in read_runs.items():
         #let num=0 correspond to the median
         ds = values["ds"]
-        v_mean = values["v_mean"]
+        v = values["v"]
         x_final = values["x_final"]
         t_final = values["t_final"]
 
         if prefix == "median":
-            _, _, _, Ni_mass_ratios[0], Fe_mass_ratios[0] = integrate(ds, v_mean, x_final,
-                                                                       t_final, frac, const)
+            _, ratios = integrate(ds, v, x_final, t_final, frac, const)
+            Ni_mass_ratios[0], Fe_mass_ratios[0] = ratios
         else:
-            _, _, _, Ni_mass_ratios[int(prefix)], Fe_mass_ratios[int(prefix)]  = integrate(ds, v_mean, x_final,
-                                                                                           t_final, frac, const)
+            _, ratios = integrate(ds, v, x_final, t_final, frac, const)
+            Ni_mass_ratios[int(prefix)], Fe_mass_ratios[int(prefix)] = ratios
 
     # read in deviates
     # Note that collect_deviates as written in correlation.py does not
@@ -156,6 +130,10 @@ def correlation_w_deviates(runs, read_runs, frac, const, do_plot, do_linear, wri
 
     for rate in deviates.keys():
         x = np.array([deviates[rate][n] for n in nums])
+
+        #The deviate for a rate may be fixed, to study isolated effects
+        if np.all(x==x[0]):
+            continue
 
         if do_linear:
             Ni_corr, Ni_pval = pearsonr(x, y_Ni)
@@ -257,7 +235,7 @@ def mass_ratios_over_time(read_runs):
     for prefix, values in read_runs.items():
         #Determine mass ratios for different t_fracs
         t_fracs = np.linspace(0.05, 0.85, num=20)
-        t_consts = np.linspace(0.02, 0.20, num=20)
+        t_consts = np.linspace(0.01, 0.15, num=15)
 
         M_Ni56f, M_Ni56c = np.zeros_like(t_fracs), np.zeros_like(t_consts)
         M_Ni58f, M_Ni58c = np.zeros_like(t_fracs), np.zeros_like(t_consts)
@@ -268,21 +246,23 @@ def mass_ratios_over_time(read_runs):
 
         for i, frac in enumerate(t_fracs):
             ds = values["ds"]
-            v_mean = values["v_mean"]
+            v = values["v"]
             x_final = values["x_final"]
             t_final = values["t_final"]
 
-            (M_Ni56f[i], M_Ni58f[i], M_Fe56f[i],
-            Ni_ratiosf[i], Fe_ratiosf[i]) = integrate(ds, v_mean, x_final, t_final, t_frac=frac)
+            masses, ratios = integrate(ds, v, x_final, t_final, t_frac=frac)
+            M_Ni56f[i], M_Ni58f[i], M_Fe56f[i] = masses
+            Ni_ratiosf[i], Fe_ratiosf[i] = ratios
 
         for i, const in enumerate(t_consts):
             ds = values["ds"]
-            v_mean = values["v_mean"]
+            v = values["v"]
             x_final = values["x_final"]
             t_final = values["t_final"]
 
-            (M_Ni56c[i], M_Ni58c[i], M_Fe56c[i],
-            Ni_ratiosc[i], Fe_ratiosc[i]) = integrate(ds, v_mean, x_final, t_final, t_const=const)
+            masses, ratios = integrate(ds, v, x_final, t_final, t_frac=frac)
+            M_Ni56c[i], M_Ni58c[i], M_Fe56c[i] = masses
+            Ni_ratiosc[i], Fe_ratiosc[i] = ratios
 
 
         if prefix == "median":
@@ -351,15 +331,24 @@ def plot_mass_v_deviates(n_rates, mass_ratios, deviates, Ni_corrs, Fe_corrs):
 
     fig, (ax_Ni, ax_Fe) = plt.subplots(1, 2, figsize=(12, 5))
 
+    #set up a color map for consistent colors across two plots
+    rates_to_plot = []
+    for rate, _ in Ni_ranked[:n_rates] + Fe_ranked[:n_rates]:
+        if rate not in rates_to_plot:
+            rates_to_plot.append(rate)
+
+    cmap = plt.get_cmap("tab10")
+    rate_colors = {rate:cmap(i) for i, rate in enumerate(rates_to_plot)}
+
     for rate, (corr, p_val) in Ni_ranked[:n_rates]:
         x = np.array([deviates[rate][n] for n in nums])
         ax_Ni.scatter(x, y_Ni, label=f"{rate} (ρ={corr:.3f}, p={p_val:.3f})",
-                      alpha=0.7)
+                      alpha=0.7, color=rate_colors[rate])
 
     for rate, (corr, p_val) in Fe_ranked[:n_rates]:
         x = np.array([deviates[rate][n] for n in nums])
         ax_Fe.scatter(x, y_Fe, label=f"{rate} (ρ={corr:.3f}, p={p_val:.3f})",
-                      alpha=0.7)
+                      alpha=0.7, color=rate_colors[rate])
 
     ax_Ni.set_xlabel("deviate")
     ax_Ni.set_ylabel("Ni56 / Ni58")
@@ -437,8 +426,8 @@ if __name__ == "__main__":
     max_x, min_x = x_final.max(), x_final.min()
 
     print("Across runs:")
-    print(f"x_final: mean = {mean_x:.3e}, stddev = {std_x:.3e}, min = {min_x:.3e}, max = {max_x:.3e}")
-    print(f"t_final: mean = {mean_t:.3f}, stddev = {std_t:.3f}, min = {min_t:.3f}, max = {max_t:.3f}")
+    print(f"x_final: mean={mean_x:.3e}, stddev={std_x:.3e}, min={min_x:.3e}, max={max_x:.3e}")
+    print(f"t_final: mean={mean_t:.3f}, stddev={std_t:.3f}, min={min_t:.3f}, max={max_t:.3f}")
     print(boldline)
     print()
 

@@ -90,7 +90,7 @@ for (( i=1; i<=NRUNS; i++)); do
             fi
         done
 
-        printf "Run %d: seed=%s rate=%s (muted), STATUS:" "$i" "$SEED" "$RATE" | tee -a "$LOG"
+        printf "Run %d: %s, STATUS:" "$i" "$SEED" | tee -a "$LOG"
         eval "$EXEC $INPUTS network.starlib_seed=${SEED} \
         network.modify_rate=${RATE} network.new_deviate=0.0" > "${RUN_LOG}" 2> "${RUN_ERR}"
 

@@ -12,6 +12,8 @@ import yt
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
 
+from shock_speed import read_directories, shock_speed
+
 yt.set_log_level(40)
 
 slimline = "-----------------------------------------------------------------------------"
@@ -51,60 +53,27 @@ def find_x_for_T(x, T, T_0=2.e9):
 
     return x1 + slope*(T_0 - T1)
 
-def mean_speed(plotfiles):
-    """ Calculates the mean shock speed given plotfiles"""
-
-    # use only the last quarter of plotfiles as this ensures
-    # a stable burning for
-    third = len(plotfiles) // 3
-    plotfiles = plotfiles[-third:]
-
-    dt = []
-    v = []
-
-    for n, p in enumerate(plotfiles):
-        time, x, T = get_T_profile(p)
-        xpos = find_x_for_T(x, T)
-
-        if n == 0:
-            xpos_old = xpos
-            time_old = time
-        else:
-            # difference with the previous file to find the det speed
-            # note: the corresponding time is centered in the interval
-            v.append((xpos - xpos_old)/(time - time_old))
-            dt.append(time - time_old)
-
-            xpos_old = xpos
-            time_old = time
-
-    v = np.array(v)
-    dt = np.array(dt)
-
-    mean = np.average(v, weights=dt)
-    weighted_std = np.sqrt(np.average((v - mean)**2, weights=dt))
-
-    return mean, weighted_std * 100 / mean
-
 def normalize_speeds(runs, output=True):
     #initialize variables
-    median_speed = 0.0
     shock_speeds = {}
     shock_cvs = {}
 
-    #ensure that a run corresponding to the median case exists
-    median_speed, median_cv = mean_speed(runs["median"])
+    # ensure and establish a run corresponding to the median case
+    # read only the final quarter files for efficiency.
+    mfiles = runs["median"]
+    quarter = len(mfiles) // 4
+    _, _, med_v = shock_speed(mfiles[-quarter:], trim=False)
 
     # calculate mean shock speeds for sampled runs
     for prefix, pfiles in runs.items():
         if prefix != "median":
-            shock_speeds[int(prefix)], shock_cvs[int(prefix)] = mean_speed(pfiles)
+            _, _, shock_speeds[int(prefix)] = shock_speed(pfiles)
 
     #normalize shock speeds
-    std = np.std(list(shock_speeds.values()), ddof=1)
+    std = np.std(np.array([v[0] for v in shock_speeds.values()]), ddof=1)
     norm_shock_speeds = {
-        num: (speed - median_speed) / std
-        for num, speed in shock_speeds.items()
+        num: (v[0] - med_v[0]) / std
+        for num, v in shock_speeds.items()
     }
 
     #sort the speeds
@@ -114,19 +83,19 @@ def normalize_speeds(runs, output=True):
     if output:
         print(f"Normalizing shock speeds...")
         print()
-        print(f"Shock speed with median rates (s_med): {median_speed:.4e}")
-        print(f"CV for shock speed with median rates (CV_med): {median_cv:.2f}%")
+        print(f"Shock speed with median rates (s_med): {med_v[0]:.4e}")
+        print(f"Rel. Unc. for shock speed with median rates (CV_med): {100 * med_v[1]/med_v[0]:.3f}%")
         print(f"Std. Dev. for shock speed across sampled runs (σ): {std:.4e}")
         print()
         print(slimline)
         print(f"{'run #':>6} | {'shock speed (s_i)':>18} | {'CV':>6} | {'z=(s_i-s_med)/σ':>18}")
         print(slimline)
-        for num, speed in shock_speeds.items():
-            print(f"{num:>6} | {speed:>18.4e} | {shock_cvs[num]:>6.2f} | {norm_shock_speeds[num]:>18.4f}")
+        for num, v in shock_speeds.items():
+            print(f"{num:>6} | {v[0]:>18.4e} | {100*v[1]/v[0]:>6.2f} | {norm_shock_speeds[num]:>18.4f}")
         print(slimline)
         print()
 
-    return norm_shock_speeds, median_speed, std
+    return norm_shock_speeds, med_v[0], std
 
 def read_deviates(plotfile):
     job_info_path = os.path.join(plotfile, "job_info")
@@ -200,6 +169,10 @@ def analysis(runs):
     for rate in deviates.keys():
         x = np.array([deviates[rate][n] for n in nums])
 
+        #The deviate for a rate may be fixed, to study isolated effects
+        if np.all(x==x[0]):
+            continue
+
         p_corr, p_pval = pearsonr(x, y)
         s_corr, s_pval = spearmanr(x, y)
 
@@ -254,103 +227,6 @@ def plot(n_rates, do_fit, speeds, deviates, corrs, median, stdev):
     fig.savefig("top_rates.png", bbox_inches="tight",
                 bbox_extra_artists=(legend,))
     plt.close(fig)
-
-def parse_info_txt(info_txt_path):
-    "Parses an info.txt file in to a dict which maps the run's local index to (seed, status)"
-    info = {}
-    with open(info_txt_path) as f:
-        for line in f:
-            line = line.strip()
-
-            #skip over any empty lines
-            if not line:
-                continue
-
-            if line.startswith("Median Run"):
-                status = line.split("STATUS:")[1].strip().split()[0]
-                info["median"] = (-1, status)
-
-            elif line.startswith("Run"):
-                header, status = line.split(",")
-
-                #read header
-                run_num = header.split(":")[0].split()[1]
-                seed = int(header.split(":")[1].strip())
-                #read status
-                status = status.split(":")[1].strip().split()
-
-                # if status is empty then there this run is still running,
-                if not status:
-                    status =  "PENDING"
-                else:
-                    status = status[0]
-
-                info[run_num] = (seed, status)
-
-    return info
-
-def read_directories(directories):
-    runs = {}
-    idx = 1
-    median_seen = False
-    seen_seeds = set()
-
-    #list directories provided
-    print(f"Total directories provided: {len(directories)}")
-    print(slimline)
-    print(f"Extracting runs and plotfiles ...")
-
-    for dir_path in directories:
-
-        dir_path = Path(dir_path)
-        if not dir_path.is_dir():
-            raise ValueError(f"{dir_path} is not a directory")
-
-        #find this dir's info file
-        info_path = dir_path / "summary.txt"
-        if not info_path.is_file():
-            raise ValueError(f"{info_path} not found")
-        info = parse_info_txt(info_path)
-
-        for run_dir in sorted(dir_path.glob("run_*")):
-            #Ensure that none of the log files enter the dict for runs
-            if not run_dir.is_dir():
-                continue
-
-            orig_prefix = run_dir.name.split("_")[1]
-
-            #We should be able to find this orig_prefix in info as well
-            if orig_prefix not in info:
-                print(f"Warning: {run_dir} has no entry in {info_path}, skipping")
-                continue
-            seed, status = info[orig_prefix]
-
-            #skip over failed runs
-            if status != "SUCCESS":
-                print(f"Skipping {run_dir} (status: {status})")
-                continue
-
-            #Avoid having several median cases
-            if orig_prefix == "median":
-                if median_seen:
-                    continue
-                median_seen = True
-                new_prefix = "median"
-            else:
-                if seed in seen_seeds:
-                    print(f"Skipping {run_dir}, duplicate seed: {seed}")
-                    continue
-                seen_seeds.add(seed)
-                new_prefix = str(idx)
-                idx += 1
-
-            plotfiles = sorted(run_dir.glob("det_x_plt*"))
-            runs[new_prefix] = plotfiles
-
-    print(f"Total of {len(runs) - 1} + 1 runs established")
-    print(slimline)
-
-    return runs
 
 if __name__ == "__main__":
 
